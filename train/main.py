@@ -1,4 +1,5 @@
 import os
+from argparse import ArgumentParser
 from collections import OrderedDict
 from functools import partial
 
@@ -42,10 +43,22 @@ def resnet50(pretrained=False):
 
 
 def train():
-    model_dir = "output_dir"
-    if not os.path.isdir(model_dir):
-        os.makedirs(model_dir)
-    writer = SummaryWriter(model_dir)
+    parser = ArgumentParser("Train models.")
+    parser.add_argument("--image_dir", type=str, required=True,
+                        help="Directory containing positive and negative images")
+    parser.add_argument("--model_dir", type=str, required=True, help="Directory to save the models")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+    parser.add_argument("--num_workers", type=int, default=8, help="Number of workers")
+    parser.add_argument("--test_split", type=float, default=0.15, help="Fraction of the dataset to use as test set")
+    parser.add_argument("--valid_split", type=float, default=0.15,
+                        help="Fraction of the dataset to use as validation set")
+    parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate")
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.model_dir):
+        os.makedirs(args.model_dir)
+    writer = SummaryWriter(args.model_dir)
 
     def send_stats(i, module, input, output):
         writer.add_scalar(f"{i}-mean", output.data.std())
@@ -54,18 +67,18 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = ImageFolder(
-        root="/data/mhassan/2d-dataset/images",
+        root=args.image_dir,
         transform=transforms.Compose([
             transforms.Resize(256),
             transforms.ToTensor()
         ])
     )
-    test_split = int(len(dataset) * 0.15)
-    validation_split = int(len(dataset) * 0.15)
+    test_split = int(len(dataset) * args.test_split)
+    validation_split = int(len(dataset) * args.valid_split)
     train_split = len(dataset) - test_split - validation_split
-    batch_size = 128
-    num_workers = 24
-    epochs = 50
+    batch_size = args.batch_size
+    num_workers = args.num_workers
+    epochs = args.epochs
 
     train, test, validation = random_split(dataset, [train_split, test_split, validation_split],
                                            torch.Generator().manual_seed(42))
@@ -113,7 +126,7 @@ def train():
     # writer.add_graph(model, torch.rand([1, 3, 224, 224]))
     start_epoch = 1
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     # model, optimizer, start_epoch = load_checkpoint(
     #     model,
     #     optimizer,
@@ -185,7 +198,7 @@ def train():
                 'best_accuracy': best_accuracy
             },
             is_best,
-            filename=os.path.join(model_dir, f'checkpoint-{epoch:03d}-val-{val_accuracy:.3f}.pth.tar')
+            filename=os.path.join(args.model_dir, f'checkpoint-{epoch:03d}-val-{val_accuracy:.3f}.pth.tar')
         )
 
         train_loss = epoch_loss / len(loaders['train'])
