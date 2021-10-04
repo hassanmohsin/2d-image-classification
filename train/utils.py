@@ -1,6 +1,21 @@
 import os
 
 import torch
+import torch.functional as F
+import torch.nn as nn
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=3):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-bce_loss)  # prevents nans when probability 0
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+        return focal_loss.mean()
 
 
 def get_mean_std(loader):
@@ -53,3 +68,20 @@ def binary_acc(y_pred, y_test):
     acc = torch.round(acc * 100)
 
     return acc
+
+
+def score(y_pred, y_test):
+    predicted_classes = torch.round(torch.sigmoid(y_pred))
+    predicted_true = torch.sum(predicted_classes == 1).float()
+    target_true = torch.sum(y_test == 1).float()
+    correct_true = torch.sum(predicted_classes == y_test * predicted_classes == 1).float()
+
+    recall = correct_true / target_true
+    precision = correct_true / predicted_true
+    f1_score = 2 * precision * recall / (precision + recall)
+
+    correct_results_sum = (predicted_classes == y_test).sum().float()
+    acc = correct_results_sum / y_test.shape[0]
+    acc = torch.round(acc * 100)
+
+    return acc, precision, recall, f1_score
