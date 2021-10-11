@@ -8,4 +8,4 @@
 
 ## Run
 
-- `python -m train`
+- `python -m train.main`
