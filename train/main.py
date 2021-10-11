@@ -5,6 +5,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+import torchmetrics
 from torch import optim
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
@@ -12,7 +13,7 @@ from torchvision import transforms, models
 from torchvision.datasets import ImageFolder
 
 from train.dataset import CustomDataset
-from train.utils import save_checkpoint, binary_acc
+from train.utils import save_checkpoint, binary_acc, load_checkpoint
 
 
 def resnet50(pretrained=False):
@@ -47,13 +48,14 @@ def train():
     parser.add_argument("--image_dir", type=str, required=True,
                         help="Directory containing positive and negative images")
     parser.add_argument("--model_dir", type=str, required=True, help="Directory to save the models")
-    parser.add_argument("--batch_size", type=int, default=128, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
-    parser.add_argument("--num_workers", type=int, default=8, help="Number of workers")
+    parser.add_argument("--num_workers", type=int, default=12, help="Number of workers")
     parser.add_argument("--test_split", type=float, default=0.15, help="Fraction of the dataset to use as test set")
     parser.add_argument("--valid_split", type=float, default=0.15,
                         help="Fraction of the dataset to use as validation set")
     parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--eval", action="store_true", default=False, help="Evaluate the test set.")
     args = parser.parse_args()
 
     if not os.path.isdir(args.model_dir):
@@ -101,7 +103,7 @@ def train():
         ),
         "test": DataLoader(
             CustomDataset(
-                train,
+                test,
                 transform
             ),
             batch_size=batch_size,
@@ -111,7 +113,7 @@ def train():
         ),
         "valid": DataLoader(
             CustomDataset(
-                train,
+                validation,
                 transform
             ),
             batch_size=batch_size,
@@ -127,17 +129,46 @@ def train():
     start_epoch = 1
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    # model, optimizer, start_epoch = load_checkpoint(
-    #     model,
-    #     optimizer,
-    #     os.path.join(model_dir, "checkpoint-best.pth.tar")
-    # )
+    model, optimizer, start_epoch = load_checkpoint(
+        model,
+        optimizer,
+        os.path.join(args.model_dir, "checkpoint-best.pth.tar")
+    )
 
     if torch.cuda.device_count() > 1:
         print("Using ", torch.cuda.device_count(), "GPUs!")
         model = nn.DataParallel(model)
 
     model.to(device)
+
+    if args.eval:
+        # Load the model checkpoint
+        # checkpoint = torch.load(os.path.join(args.model_dir, "checkpoint-best.pth.tar"))
+        # model.load_state_dict(checkpoint["state_dict"])
+
+        acc_metric = torchmetrics.Accuracy()
+        fbeta_metric = torchmetrics.FBeta(num_classes=2, beta=0.5)
+        cf_metric = torchmetrics.ConfusionMatrix(num_classes=2)
+        acc_metric.to(device)
+        fbeta_metric.to(device)
+        cf_metric.to(device)
+        model.eval()
+        with torch.no_grad():
+            for i, (images, labels) in enumerate(loaders['test'], 0):
+                images, labels = images.to(device), labels.to(torch.int).to(device).unsqueeze(1)
+                outputs = model(images)
+                pred_labels = torch.round(torch.sigmoid(outputs)).to(torch.int)
+                # labels = labels.int()
+                acc = acc_metric(pred_labels, labels)
+                fbeta = fbeta_metric(pred_labels, labels)
+                cf = cf_metric(pred_labels, labels)
+                # print(f"Current batch acc: {acc}")
+
+        test_accuracy = acc_metric.compute()
+        test_fbeta = fbeta_metric.compute()
+        test_cf = cf_metric.compute().cpu().numpy()
+        print(f"Test accuracy: {test_accuracy}\nTest FBeta: {test_fbeta}\nConfusion matrix: {test_cf}")
+        return
 
     best_accuracy = 0.0
     for epoch in range(start_epoch, epochs + 1):  # loop over the dataset multiple times
@@ -224,3 +255,7 @@ def train():
         writer.flush()
 
     print('Finished Training.')
+
+
+if __name__ == '__main__':
+    train()
