@@ -13,7 +13,7 @@ from torchvision import transforms, models
 from torchvision.datasets import ImageFolder
 
 from train.dataset import CustomDataset
-from train.utils import save_checkpoint, binary_acc, load_checkpoint
+from train.utils import save_checkpoint, load_checkpoint, optimizer_to
 
 
 def resnet50(pretrained=False):
@@ -48,9 +48,9 @@ def train():
     parser.add_argument("--image_dir", type=str, required=True,
                         help="Directory containing positive and negative images")
     parser.add_argument("--model_dir", type=str, required=True, help="Directory to save the models")
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
-    parser.add_argument("--num_workers", type=int, default=12, help="Number of workers")
+    parser.add_argument("--batch_size", type=int, default=384, help="Batch size")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
+    parser.add_argument("--num_workers", type=int, default=24, help="Number of workers")
     parser.add_argument("--test_split", type=float, default=0.15, help="Fraction of the dataset to use as test set")
     parser.add_argument("--valid_split", type=float, default=0.15,
                         help="Fraction of the dataset to use as validation set")
@@ -127,9 +127,10 @@ def train():
 
     # writer.add_graph(model, torch.rand([1, 3, 224, 224]))
     start_epoch = 1
+    best_f2, best_acc = 0., 0.
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    model, optimizer, start_epoch = load_checkpoint(
+    model, optimizer, start_epoch, best_f2 = load_checkpoint(
         model,
         optimizer,
         os.path.join(args.model_dir, "checkpoint-best.pth.tar")
@@ -140,18 +141,17 @@ def train():
         model = nn.DataParallel(model)
 
     model.to(device)
+    optimizer_to(optimizer, device)
 
     if args.eval:
         # Load the model checkpoint
         # checkpoint = torch.load(os.path.join(args.model_dir, "checkpoint-best.pth.tar"))
         # model.load_state_dict(checkpoint["state_dict"])
 
-        acc_metric = torchmetrics.Accuracy()
-        fbeta_metric = torchmetrics.FBeta(num_classes=2, beta=0.5)
-        cf_metric = torchmetrics.ConfusionMatrix(num_classes=2)
-        acc_metric.to(device)
-        fbeta_metric.to(device)
-        cf_metric.to(device)
+        acc_metric = torchmetrics.Accuracy().to(device)
+        f2_metric = torchmetrics.FBeta(num_classes=2, beta=2.0).to(device)
+        cf_metric = torchmetrics.ConfusionMatrix(num_classes=2).to(device)
+
         model.eval()
         with torch.no_grad():
             for i, (images, labels) in enumerate(loaders['test'], 0):
@@ -160,20 +160,23 @@ def train():
                 pred_labels = torch.round(torch.sigmoid(outputs)).to(torch.int)
                 # labels = labels.int()
                 acc = acc_metric(pred_labels, labels)
-                fbeta = fbeta_metric(pred_labels, labels)
+                fbeta = f2_metric(pred_labels, labels)
                 cf = cf_metric(pred_labels, labels)
                 # print(f"Current batch acc: {acc}")
 
         test_accuracy = acc_metric.compute()
-        test_fbeta = fbeta_metric.compute()
+        test_fbeta = f2_metric.compute()
         test_cf = cf_metric.compute().cpu().numpy()
-        print(f"Test accuracy: {test_accuracy}\nTest FBeta: {test_fbeta}\nConfusion matrix: {test_cf}")
+        print(f"Test accuracy: {test_accuracy}\nTest F2: {test_fbeta}\nConfusion matrix: {test_cf}")
         return
 
-    best_accuracy = 0.0
     for epoch in range(start_epoch, epochs + 1):  # loop over the dataset multiple times
-        epoch_loss, epoch_acc = 0., 0.
-        running_loss, running_acc = 0., 0.
+        train_f2_metric = torchmetrics.FBeta(num_classes=2, beta=2.).to(device)
+        val_f2_metric = torchmetrics.FBeta(num_classes=2, beta=2.).to(device)
+        train_acc_metric = torchmetrics.Accuracy().to(device)
+        val_acc_metric = torchmetrics.Accuracy().to(device)
+        running_acc, running_f2 = 0., 0.
+        epoch_loss, running_loss = 0., 0.
         model.train()
         for i, (images, labels) in enumerate(loaders['train'], 0):
             images, labels = images.to(device), labels.to(torch.float).to(device).unsqueeze(1)
@@ -185,22 +188,23 @@ def train():
             optimizer.zero_grad()
             outputs = model(images)
             loss = criterion(outputs, labels)
-            acc = binary_acc(outputs, labels)
-
             loss.backward()
             optimizer.step()
 
+            pred_labels = torch.round(torch.sigmoid(outputs)).to(torch.int)
             epoch_loss += loss.item()
-            epoch_acc += acc.item()
             running_loss += loss.item()
-            running_acc += acc.item()
+            labels = labels.to(torch.int)
+            running_f2 += train_f2_metric(pred_labels, labels)
+            running_acc += train_acc_metric(pred_labels, labels)
             if i % 10 == 0:
-                print(f'iter: {i:04}: Running loss: {running_loss / 10:.3f} | Running acc: {running_acc / 10:.3f}')
-                running_loss = 0.0
-                running_acc = 0.0
+                print(
+                    f'Iter: {i:04}: Running loss: {running_loss / 10:.3f} | Running acc: {running_acc / 10:.3f} | Running f2: {running_f2 / 10:.3f}')
+                running_loss = 0.
+                running_f2 = 0.
+                running_acc = 0.
 
         model.eval()
-        val_accuracy = 0.0
         val_loss = 0.0
         with torch.no_grad():
             for i, (images, labels) in enumerate(loaders['valid'], 0):
@@ -211,14 +215,18 @@ def train():
 
                 outputs = model(images)
                 loss = criterion(outputs, labels)
-                acc = binary_acc(outputs, labels)
-                val_accuracy += acc.item()
+                pred_labels = torch.round(torch.sigmoid(outputs)).to(torch.int)
+                labels = labels.to(torch.int)
+                acc = val_acc_metric(pred_labels, labels)
+                f2 = val_f2_metric(pred_labels, labels)
                 val_loss += loss.item()
 
-        val_accuracy = val_accuracy / len(loaders['valid'])
+        val_acc = val_acc_metric.compute()
+        val_f2 = val_f2_metric.compute()
         val_loss = val_loss / len(loaders['valid'])
-        is_best = bool(val_accuracy > best_accuracy)
-        best_accuracy = max(val_accuracy, best_accuracy)
+        is_best = bool(val_f2 > best_f2)
+        best_f2 = max(best_f2, val_f2)
+        best_acc = max(best_acc, val_acc)
         # Save checkpoint if is a new best
         save_checkpoint(
             {
@@ -226,24 +234,28 @@ def train():
                 'optimizer': optimizer.state_dict(),
                 'state_dict': model.module.state_dict(),
                 'loss': val_loss,
-                'best_accuracy': best_accuracy
+                'best_f2': best_f2
             },
             is_best,
-            filename=os.path.join(args.model_dir, f'checkpoint-{epoch:03d}-val-{val_accuracy:.3f}.pth.tar')
+            filename=os.path.join(args.model_dir, f'checkpoint-{epoch:03d}-val-{val_f2:.3f}.pth.tar')
         )
 
         train_loss = epoch_loss / len(loaders['train'])
-        train_acc = epoch_acc / len(loaders['train'])
+        train_acc = train_acc_metric.compute()
+        train_f2 = train_f2_metric.compute()
         print(
-            f'Epoch {epoch:03}: Loss: {train_loss:.3f} | Acc:'
-            f' {train_acc:.3f} | Val Loss: {val_loss:.3f} | Val Acc: {best_accuracy:.3f}'
+            f'Epoch {epoch:03}: | Train: Loss: {train_loss:.3f}, Acc: {train_acc:.3f}, F2: {train_f2:.3f} | '
+            f'Val: Loss: {val_loss:.3f}, Acc: {val_acc:.3f}, F2: {val_f2:.3f} | '
+            f'Best: Acc: {best_acc:.3f}, F2: {best_f2:.3f}'
         )
 
         # add to tensorboard
         writer.add_scalar("train/loss", train_loss, epoch)
         writer.add_scalar("train/accuracy", train_acc, epoch)
+        writer.add_scalar("train/f2", train_f2, epoch)
         writer.add_scalar("validation/loss", val_loss, epoch)
-        writer.add_scalar("validation/accuracy", val_accuracy, epoch)
+        writer.add_scalar("validation/accuracy", val_acc, epoch)
+        writer.add_scalar("validation/f2", val_f2, epoch)
 
         for name, weight in model.named_parameters():
             writer.add_histogram(name, weight, epoch)

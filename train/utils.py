@@ -36,17 +36,19 @@ def get_mean_std(loader):
 def load_checkpoint(model, optimizer, filename='checkpoint-best.pth.tar'):
     # Note: Input model & optimizer should be pre-defined.  This routine only updates their states.
     start_epoch = 1
+    best_f2 = 0.
     if os.path.isfile(filename):
         print("=> loading checkpoint '{}'".format(filename))
         checkpoint = torch.load(filename)
         start_epoch = checkpoint['epoch']
+        best_f2 = checkpoint['best_f2']
         model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         print("=> loaded checkpoint '{}' (epoch {})".format(filename, checkpoint['epoch']))
     else:
         print("=> no checkpoint found at '{}'".format(filename))
 
-    return model, optimizer, start_epoch
+    return model, optimizer, start_epoch, best_f2
 
 
 def save_checkpoint(state, is_best, filename):
@@ -85,3 +87,18 @@ def score(y_pred, y_test):
     acc = torch.round(acc * 100)
 
     return acc, precision, recall, f1_score
+
+
+def optimizer_to(optim, device):
+    for param in optim.state.values():
+        # Not sure there are any global tensors in the state dict
+        if isinstance(param, torch.Tensor):
+            param.data = param.data.to(device)
+            if param._grad is not None:
+                param._grad.data = param._grad.data.to(device)
+        elif isinstance(param, dict):
+            for subparam in param.values():
+                if isinstance(subparam, torch.Tensor):
+                    subparam.data = subparam.data.to(device)
+                    if subparam._grad is not None:
+                        subparam._grad.data = subparam._grad.data.to(device)
