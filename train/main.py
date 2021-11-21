@@ -2,7 +2,7 @@ import os
 from argparse import ArgumentParser
 from collections import OrderedDict
 from functools import partial
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torchmetrics
@@ -13,7 +13,7 @@ from torchvision import transforms, models
 from torchvision.datasets import ImageFolder
 
 from train.dataset import CustomDataset
-from train.utils import save_checkpoint, binary_acc, load_checkpoint
+from train.utils import save_checkpoint, binary_acc, load_checkpoint, FocalLoss
 
 
 def resnet50(pretrained=False):
@@ -50,6 +50,7 @@ def train():
     parser.add_argument("--model_dir", type=str, required=True, help="Directory to save the models")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+    parser.add_argument("--loss", type=str, default="bce", help="Loss function. bce or focal")
     parser.add_argument("--num_workers", type=int, default=12, help="Number of workers")
     parser.add_argument("--test_split", type=float, default=0.15, help="Fraction of the dataset to use as test set")
     parser.add_argument("--valid_split", type=float, default=0.15,
@@ -68,13 +69,7 @@ def train():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = ImageFolder(
-        root=args.image_dir,
-        transform=transforms.Compose([
-            transforms.Resize(256),
-            transforms.ToTensor()
-        ])
-    )
+    dataset = ImageFolder(root=args.image_dir)
     test_split = int(len(dataset) * args.test_split)
     validation_split = int(len(dataset) * args.valid_split)
     train_split = len(dataset) - test_split - validation_split
@@ -86,6 +81,8 @@ def train():
                                            torch.Generator().manual_seed(42))
 
     transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
     ])
@@ -94,7 +91,18 @@ def train():
         "train": DataLoader(
             CustomDataset(
                 train,
-                transform
+                transform = transforms.Compose(
+                    [
+                        transforms.Resize(256),
+                        transforms.RandomHorizontalFlip(p=0.5),
+                        transforms.RandomVerticalFlip(p=0.5),
+                        transforms.ToTensor(),
+                        transforms.Normalize(
+                            mean=[0.485, 0.456, 0.406],
+                            std=[0.229, 0.224, 0.225]
+                        )
+                    ]
+                )
             ),
             batch_size=batch_size,
             shuffle=True,
@@ -127,7 +135,15 @@ def train():
 
     # writer.add_graph(model, torch.rand([1, 3, 224, 224]))
     start_epoch = 1
-    criterion = nn.BCEWithLogitsLoss()
+    if args.loss == "bce":
+        criterion = nn.BCEWithLogitsLoss() 
+    elif args.loss == "focal":
+        criterion = FocalLoss()
+    else:
+        criterion = None
+
+    assert criterion is not None
+
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     model, optimizer, start_epoch = load_checkpoint(
         model,
@@ -153,20 +169,31 @@ def train():
         fbeta_metric.to(device)
         cf_metric.to(device)
         model.eval()
+        all_y = []
+        all_pred = []
+        indices = []
         with torch.no_grad():
-            for i, (images, labels) in enumerate(loaders['test'], 0):
+            for i, (idxs, images, labels) in enumerate(loaders['test'], 0):
                 images, labels = images.to(device), labels.to(torch.int).to(device).unsqueeze(1)
                 outputs = model(images)
                 pred_labels = torch.round(torch.sigmoid(outputs)).to(torch.int)
                 # labels = labels.int()
+                #print(labels.cpu().numpy().tolist())
+                ids = idxs.numpy().tolist()
+                indices += [os.path.split(f[0])[1] for f in [dataset.samples[i] for i in ids]]
+                all_y += labels.cpu().numpy().tolist()
+                all_pred += outputs.cpu().numpy().tolist()
                 acc = acc_metric(pred_labels, labels)
                 fbeta = fbeta_metric(pred_labels, labels)
                 cf = cf_metric(pred_labels, labels)
                 # print(f"Current batch acc: {acc}")
-
+        np.save(os.path.join(args.model_dir, 'y'), np.array(all_y))
+        np.save(os.path.join(args.model_dir, 'y_pred'), np.array(all_pred))
+        np.save(os.path.join(args.model_dir, 'indices'), np.array(indices))
         test_accuracy = acc_metric.compute()
         test_fbeta = fbeta_metric.compute()
         test_cf = cf_metric.compute().cpu().numpy()
+        np.save(os.path.join(args.model_dir, 'cf'), test_cf)
         print(f"Test accuracy: {test_accuracy}\nTest FBeta: {test_fbeta}\nConfusion matrix: {test_cf}")
         return
 
@@ -175,7 +202,7 @@ def train():
         epoch_loss, epoch_acc = 0., 0.
         running_loss, running_acc = 0., 0.
         model.train()
-        for i, (images, labels) in enumerate(loaders['train'], 0):
+        for i, (idxs, images, labels) in enumerate(loaders['train'], 0):
             images, labels = images.to(device), labels.to(torch.float).to(device).unsqueeze(1)
             # add to tensorboard
             # grid = torchvision.utils.make_grid(images[:8])
@@ -203,7 +230,7 @@ def train():
         val_accuracy = 0.0
         val_loss = 0.0
         with torch.no_grad():
-            for i, (images, labels) in enumerate(loaders['valid'], 0):
+            for i, (idxs, images, labels) in enumerate(loaders['valid'], 0):
                 images, labels = images.to(device), labels.to(torch.float).to(device).unsqueeze(1)
                 # add to tensorboard
                 # grid = torchvision.utils.make_grid(images[:8])
