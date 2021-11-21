@@ -10,7 +10,7 @@ class CustomDataset(Dataset):
         x, y = self.subset[idx]
         if self.transform:
             x = self.transform(x)
-        return x, y
+        return self.subset.indices[idx], x, y # first element is the list of indices from the original dataset
 
     def __len__(self):
         return len(self.subset)

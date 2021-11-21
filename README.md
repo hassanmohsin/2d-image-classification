@@ -6,6 +6,10 @@
 - PyTorch
 - Torchvision
 
-## Run
+## Train
+- `./train.sh` - Train on the subsets of the main dataset.
 
-- `python -m train.main`
+## Evaluate
+- `./eval.sh` - Evaluate on the test set.
+- `python -m train.evaluate` - Produce the evaluation metrics.
+
