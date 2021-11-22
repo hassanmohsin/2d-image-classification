@@ -1,8 +1,8 @@
 import os
 
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class FocalLoss(nn.Module):
@@ -35,20 +35,21 @@ def get_mean_std(loader):
 # TODO: Enable loading epoch, loss and accuracy also
 def load_checkpoint(model, optimizer, filename='checkpoint-best.pth.tar'):
     # Note: Input model & optimizer should be pre-defined.  This routine only updates their states.
-    start_epoch = 1
-    best_f2 = 0.
+    start_epoch = 0
+    best_f1, best_acc = 0., 0.
     if os.path.isfile(filename):
         print("=> loading checkpoint '{}'".format(filename))
         checkpoint = torch.load(filename)
         start_epoch = checkpoint['epoch']
-        best_f2 = checkpoint['best_f2']
+        best_f1 = checkpoint['best_f1']
+        best_acc = checkpoint['best_acc']
         model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         print("=> loaded checkpoint '{}' (epoch {})".format(filename, checkpoint['epoch']))
     else:
         print("=> no checkpoint found at '{}'".format(filename))
 
-    return model, optimizer, start_epoch, best_f2
+    return model, optimizer, start_epoch, best_f1, best_acc
 
 
 def save_checkpoint(state, is_best, filename):
@@ -84,7 +85,6 @@ def score(y_pred, y_test):
 
     correct_results_sum = (predicted_classes == y_test).sum().float()
     acc = correct_results_sum / y_test.shape[0]
-    acc = torch.round(acc * 100)
 
     return acc, precision, recall, f1_score
 
