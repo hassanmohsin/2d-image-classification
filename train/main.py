@@ -8,12 +8,11 @@ import torch
 import torch.nn as nn
 import torchmetrics
 from torch import optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms, models
-from torchvision.datasets import ImageFolder
 
-from train.dataset import CustomDataset
+from train.dataset import CombinedDataset
 from train.utils import save_checkpoint, load_checkpoint, FocalLoss, optimizer_to
 
 
@@ -48,14 +47,13 @@ def train():
     parser = ArgumentParser("Train models.")
     parser.add_argument("--image_dir", type=str, required=True,
                         help="Directory containing positive and negative images")
-    parser.add_argument("--model_dir", type=str, required=True, help="Directory to save the models")
+    parser.add_argument("--model_dir", default=None, type=str, required=True, help="Directory to save the models")
+    parser.add_argument("--warmup_model_dir", default=None, type=str, help="Model directory to start the training from")
+    parser.add_argument("--n_samples", type=int, default=None, help="Number of samples to train on")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--loss", type=str, default="bce", help="Loss function. bce or focal")
     parser.add_argument("--num_workers", type=int, default=12, help="Number of workers")
-    parser.add_argument("--test_split", type=float, default=0.15, help="Fraction of the dataset to use as test set")
-    parser.add_argument("--valid_split", type=float, default=0.15,
-                        help="Fraction of the dataset to use as validation set")
     parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--eval", action="store_true", default=False, help="Evaluate the test set.")
     args = parser.parse_args()
@@ -70,28 +68,17 @@ def train():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = ImageFolder(root=args.image_dir)
-    test_split = int(len(dataset) * args.test_split)
-    validation_split = int(len(dataset) * args.valid_split)
-    train_split = len(dataset) - test_split - validation_split
-    batch_size = args.batch_size
-    num_workers = args.num_workers
-    epochs = args.epochs
-
-    train, test, validation = random_split(dataset, [train_split, test_split, validation_split],
-                                           torch.Generator().manual_seed(42))
-
-    transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
-    ])
+    train_dir = os.path.join(args.image_dir, "train")
+    validation_dir = os.path.join(args.image_dir, "validation")
 
     loaders = {
         "train": DataLoader(
-            CustomDataset(
-                train,
+            CombinedDataset(
+                os.path.join(train_dir, "positive_samples.csv"),
+                os.path.join(train_dir, "negative_samples.csv"),
+                n_samples=args.n_samples,
+                label_ratio=0.5,
+                data_ratio=[0.25, 0.25, 0.25, 0.25],
                 transform=transforms.Compose(
                     [
                         transforms.Resize(256),
@@ -105,34 +92,32 @@ def train():
                     ]
                 )
             ),
-            batch_size=batch_size,
+            batch_size=args.batch_size,
             shuffle=True,
-            num_workers=num_workers,
-            pin_memory=True
-        ),
-        "test": DataLoader(
-            CustomDataset(
-                test,
-                transform
-            ),
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
+            num_workers=args.num_workers,
             pin_memory=True
         ),
         "valid": DataLoader(
-            CustomDataset(
-                validation,
-                transform
+            CombinedDataset(
+                os.path.join(validation_dir, "positive_samples.csv"),
+                os.path.join(validation_dir, "negative_samples.csv"),
+                label_ratio=0.5,
+                data_ratio=[0.25, 0.25, 0.25, 0.25],
+                transform=transforms.Compose([
+                    transforms.Resize(256),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+                ])
             ),
-            batch_size=batch_size,
+            batch_size=args.batch_size,
             shuffle=False,
-            num_workers=num_workers,
+            num_workers=args.num_workers,
             pin_memory=True
-        )
+        ),
     }
 
-    model = resnet50(pretrained=True)
+    model = resnet50(pretrained=False)
 
     # writer.add_graph(model, torch.rand([1, 3, 224, 224]))
     start_epoch = 1
@@ -146,11 +131,14 @@ def train():
     assert criterion is not None
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    model, optimizer, start_epoch, best_f1, best_acc = load_checkpoint(
-        model,
-        optimizer,
-        os.path.join(args.model_dir, "checkpoint-best.pth.tar")
-    )
+    if args.warmup_model_dir:
+        model, optimizer, start_epoch, best_f1, best_acc = load_checkpoint(
+            model,
+            optimizer,
+            os.path.join(args.warmup_model_dir, "checkpoint-best.pth.tar")
+        )
+    else:
+        start_epoch, best_f1, best_acc = 0, 0., 0.
 
     if torch.cuda.device_count() > 1:
         print("Using ", torch.cuda.device_count(), "GPUs!")
@@ -158,7 +146,7 @@ def train():
 
     model.to(device)
     optimizer_to(optimizer, device)
-    print(f"Initial values: start epoch: {start_epoch + 1}, best_f1: {best_f1:.3f}, best_acc: {best_acc:.3f}")
+    # print(f"Initial values: start epoch: {start_epoch + 1}, best_f1: {best_f1:.3f}, best_acc: {best_acc:.3f}")
 
     if args.eval:
         # Load the model checkpoint
@@ -174,13 +162,11 @@ def train():
         all_pred = []
         indices = []
         with torch.no_grad():
-            for i, (idxs, images, labels) in enumerate(loaders['train'], 0):
+            for i, (images, labels) in enumerate(loaders['valid'], 0):
                 images, labels = images.to(device), labels.to(torch.int).to(device).unsqueeze(1)
                 outputs = model(images)
                 pred_proba = torch.sigmoid(outputs)
                 pred_labels = torch.round(pred_proba).to(torch.int)
-                ids = idxs.numpy().tolist()
-                indices += [os.path.split(f[0])[1] for f in [dataset.samples[i] for i in ids]]
                 all_y += labels.cpu().numpy().tolist()
                 all_pred += pred_proba.cpu().numpy().tolist()
                 acc = acc_metric(pred_labels, labels)
@@ -202,14 +188,14 @@ def train():
         cf_metric.reset()
         return
 
-    for epoch in range(start_epoch + 1, epochs + 1):  # loop over the dataset multiple times
+    for epoch in range(start_epoch + 1, start_epoch + 1 + args.epochs + 1):  # loop over the dataset multiple times
         train_f1_metric = torchmetrics.F1().to(device)
         train_acc_metric = torchmetrics.Accuracy().to(device)
 
         running_acc, running_f1 = 0., 0.
         epoch_loss, running_loss = 0., 0.
         model.train()
-        for i, (idxs, images, labels) in enumerate(loaders['train'], 0):
+        for i, (images, labels) in enumerate(loaders['train'], 0):
             images, labels = images.to(device), labels.to(torch.float).to(device).unsqueeze(1)
             # add to tensorboard
             # grid = torchvision.utils.make_grid(images[:8])
@@ -243,13 +229,14 @@ def train():
         train_f1_metric.reset()
         train_acc_metric.reset()
 
+        print("Validating...")
         model.eval()
 
         val_acc_metric = torchmetrics.Accuracy().to(device)
         val_f1_metric = torchmetrics.F1().to(device)
         val_loss = 0.0
         with torch.no_grad():
-            for i, (idxs, images, labels) in enumerate(loaders['valid'], 0):
+            for i, (images, labels) in enumerate(loaders['valid'], 0):
                 images, labels = images.to(device), labels.to(torch.float).to(device).unsqueeze(1)
                 # add to tensorboard
                 # grid = torchvision.utils.make_grid(images[:8])
@@ -288,9 +275,10 @@ def train():
         )
 
         print(
-            f'Epoch {epoch:03}: | Train: Loss: {train_loss:.3f}, Acc: {train_acc:.3f}, F1: {train_f1:.3f} | '
-            f'Val: Loss: {val_loss:.3f}, Acc: {val_acc:.3f}, F1: {val_f1:.3f} | '
-            f'Best: Acc: {best_acc:.3f}, F1: {best_f1:.3f}'
+            f'Epoch {epoch:03}: '
+            f'\nTrain: Loss: {train_loss:.3f}, Acc: {train_acc:.3f}, F1: {train_f1:.3f}'
+            f'\nVal:   Loss: {val_loss:.3f}, Acc: {val_acc:.3f}, F1: {val_f1:.3f}'
+            f'\nBest:               Acc: {best_acc:.3f}, F1: {best_f1:.3f}'
         )
 
         # add to tensorboard
