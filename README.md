@@ -6,10 +6,6 @@
 - PyTorch
 - Torchvision
 
-## Train
-- `./train.sh` - Train on the subsets of the main dataset.
-
-## Evaluate
-- `./eval.sh` - Evaluate on the test set.
-- `python -m train.evaluate` - Produce the evaluation metrics.
-
+## Train and Evaluate
+- `./train.sh` - Train the model by increasing the training set size gradually.
+- `python eval_image.py` - To evaluate images. See the output of `python eval_image.py --help` for arguments.
